@@ -215,6 +215,21 @@ async def referral_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+
+    chat = in_chat(uid)
+
+    if not chat:
+        return
+
+    u1, u2 = chat
+    partner = u2 if uid == u1 else u1
+
+    await context.bot.send_message(
+        chat_id=partner,
+        text=update.message.text
+    )
 # ---------------- APP ---------------- #
 
 app = Application.builder().token(TOKEN).build()
@@ -225,10 +240,16 @@ app.add_handler(CommandHandler("next", next_cmd))
 app.add_handler(CommandHandler("end", end_cmd))
 app.add_handler(CommandHandler("referral", referral_cmd))
 
-# Buttons
 app.add_handler(CallbackQueryHandler(btn_next, pattern="^next$"))
 app.add_handler(CallbackQueryHandler(btn_end, pattern="^end$"))
 app.add_handler(CallbackQueryHandler(btn_ref, pattern="^ref$"))
+
+app.add_handler(
+    MessageHandler(
+        filters.TEXT & ~filters.COMMAND,
+        forward_message
+    )
+)
 
 print("Bot running...")
 app.run_polling()
