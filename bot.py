@@ -1,3 +1,4 @@
+import os
 import sqlite3
 import time
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -10,9 +11,9 @@ from telegram.ext import (
     filters,
 )
 
-TOKEN = "8838203470:AAGph39y3fybTOEAaHXz0mDzYL5IINY4LVo"
-BOT_USERNAME = "Annchattingbot"
-VIP_LIMIT = 10
+# ---------------- TOKEN (RAILWAY SAFE) ---------------- #
+
+TOKEN = os.getenv("8838203470:AAGph39y3fybTOEAaHXz0mDzYL5IINY4LVo")
 
 # ---------------- DATABASE ---------------- #
 
@@ -22,7 +23,6 @@ cur = conn.cursor()
 cur.execute("""
 CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
-    status TEXT DEFAULT 'ready',
     referral_count INTEGER DEFAULT 0,
     premium INTEGER DEFAULT 0
 )
@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS active_chats (
 """)
 
 cur.execute("""
-CREATE TABLE IF NOT EXISTS waiting_queue (
+CREATE TABLE IF NOT EXISTS queue (
     user_id INTEGER PRIMARY KEY,
     timestamp INTEGER
 )
@@ -55,28 +55,20 @@ def is_premium(uid):
     r = cur.fetchone()
     return r and r[0] == 1
 
-def set_premium(uid):
-    cur.execute("UPDATE users SET premium=1 WHERE user_id=?", (uid,))
-    conn.commit()
-
 def get_ref(uid):
     cur.execute("SELECT referral_count FROM users WHERE user_id=?", (uid,))
     r = cur.fetchone()
     return r[0] if r else 0
 
 def add_ref(uid):
-    cur.execute("SELECT referral_count FROM users WHERE user_id=?", (uid,))
-    r = cur.fetchone()
-
-    if not r:
-        return 0
-
-    count = r[0] + 1
-
+    count = get_ref(uid) + 1
     cur.execute("UPDATE users SET referral_count=? WHERE user_id=?", (count, uid))
     conn.commit()
-
     return count
+
+def set_premium(uid):
+    cur.execute("UPDATE users SET premium=1 WHERE user_id=?", (uid,))
+    conn.commit()
 
 def in_chat(uid):
     cur.execute("SELECT * FROM active_chats WHERE user1=? OR user2=?", (uid, uid))
@@ -86,42 +78,34 @@ def add_queue(uid):
     ts = int(time.time())
     if is_premium(uid):
         ts -= 10000
-    cur.execute("INSERT OR REPLACE INTO waiting_queue VALUES (?,?)", (uid, ts))
+    cur.execute("INSERT OR REPLACE INTO queue VALUES (?,?)", (uid, ts))
     conn.commit()
 
 def remove_queue(uid):
-    cur.execute("DELETE FROM waiting_queue WHERE user_id=?", (uid,))
+    cur.execute("DELETE FROM queue WHERE user_id=?", (uid,))
     conn.commit()
 
 def end_chat(uid):
     cur.execute("DELETE FROM active_chats WHERE user1=? OR user2=?", (uid, uid))
     conn.commit()
 
-# ---------------- MENU ---------------- #
+# ---------------- UI ---------------- #
 
 def menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔎 Next", callback_data="next")],
         [InlineKeyboardButton("❌ End", callback_data="end")],
-        [InlineKeyboardButton("💰 Referral", callback_data="referral")]
+        [InlineKeyboardButton("💰 Referral", callback_data="ref")]
     ])
 
 # ---------------- VIP CHECK ---------------- #
 
 async def check_vip(bot, uid):
-    count = get_ref(uid)
-
-    if count >= VIP_LIMIT and not is_premium(uid):
+    if get_ref(uid) >= 10:
         set_premium(uid)
+        await bot.send_message(uid, "💎 VIP UNLOCKED! You reached 10 referrals!")
 
-        await bot.send_message(
-            uid,
-            "💎 VIP UNLOCKED!\n\n"
-            "You reached 10 referrals 🎉\n"
-            "You are now VIP!"
-        )
-
-# ---------------- START (REF SYSTEM) ---------------- #
+# ---------------- START ---------------- #
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -131,30 +115,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
         try:
             ref_id = int(context.args[0])
-
             if ref_id != uid:
                 add_ref(ref_id)
                 await check_vip(context.bot, ref_id)
         except:
             pass
 
-    await update.message.reply_text(
-        "Welcome 👋 Start chatting!",
-        reply_markup=menu()
-    )
+    await update.message.reply_text("Welcome 👋", reply_markup=menu())
 
 # ---------------- MATCHING ---------------- #
 
-async def do_next(uid, context, send):
+async def next_user(uid, context, send):
     if in_chat(uid):
         await send("Already in chat")
         return
 
     add_queue(uid)
-    await send("Searching partner...")
+    await send("Searching...")
 
     cur.execute("""
-        SELECT user_id FROM waiting_queue
+        SELECT user_id FROM queue
         WHERE user_id != ?
         ORDER BY timestamp ASC
         LIMIT 1
@@ -176,61 +156,43 @@ async def do_next(uid, context, send):
     await context.bot.send_message(uid, "Connected!", reply_markup=menu())
     await context.bot.send_message(partner, "Connected!", reply_markup=menu())
 
-# ---------------- END ---------------- #
+# ---------------- REFERRAL ---------------- #
 
-async def do_end(uid, send):
-    end_chat(uid)
-    remove_queue(uid)
-    await send("Chat ended")
-
-# ---------------- REFERRAL PANEL ---------------- #
-
-async def do_referral(uid, send):
+async def referral(uid, send):
     ref = get_ref(uid)
     prem = is_premium(uid)
 
-    link = f"https://t.me/{BOT_USERNAME}?start={uid}"
+    link = f"https://t.me/Annchattingbot?start={uid}"
 
-    text = (
-        "💰 REFERRAL SYSTEM 💰\n\n"
-        f"👥 Referrals: {ref}/{VIP_LIMIT}\n"
-        f"⭐ Status: {'VIP ACTIVE' if prem else 'FREE USER'}\n\n"
-        f"Invite Link:\n{link}"
+    await send(
+        f"💰 Referral System\n\n"
+        f"👥 Referrals: {ref}/10\n"
+        f"⭐ Status: {'VIP' if prem else 'FREE'}\n\n"
+        f"Link:\n{link}"
     )
-
-    await send(text)
 
 # ---------------- BUTTONS ---------------- #
 
-async def next_btn(update, context):
+async def btn_next(update, context):
     q = update.callback_query
     await q.answer()
-    await do_next(q.from_user.id, context, q.message.reply_text)
+    await next_user(q.from_user.id, context, q.message.reply_text)
 
-async def end_btn(update, context):
+async def btn_end(update, context):
     q = update.callback_query
     await q.answer()
-    await do_end(q.from_user.id, q.message.reply_text)
+    end_chat(q.from_user.id)
+    remove_queue(q.from_user.id)
+    await q.message.reply_text("Chat ended")
 
-async def referral_btn(update, context):
+async def btn_ref(update, context):
     q = update.callback_query
     await q.answer()
-    await do_referral(q.from_user.id, q.message.reply_text)
-
-# ---------------- COMMANDS ---------------- #
-
-async def next_cmd(update, context):
-    await do_next(update.effective_user.id, context, update.message.reply_text)
-
-async def end_cmd(update, context):
-    await do_end(update.effective_user.id, update.message.reply_text)
-
-async def referral_cmd(update, context):
-    await do_referral(update.effective_user.id, update.message.reply_text)
+    await referral(q.from_user.id, q.message.reply_text)
 
 # ---------------- CHAT ---------------- #
 
-async def forward(update, context):
+async def forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
 
     chat = in_chat(uid)
@@ -247,13 +209,10 @@ async def forward(update, context):
 app = Application.builder().token(TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("next", next_cmd))
-app.add_handler(CommandHandler("end", end_cmd))
-app.add_handler(CommandHandler("referral", referral_cmd))
 
-app.add_handler(CallbackQueryHandler(next_btn, pattern="^next$"))
-app.add_handler(CallbackQueryHandler(end_btn, pattern="^end$"))
-app.add_handler(CallbackQueryHandler(referral_btn, pattern="^referral$"))
+app.add_handler(CallbackQueryHandler(btn_next, pattern="^next$"))
+app.add_handler(CallbackQueryHandler(btn_end, pattern="^end$"))
+app.add_handler(CallbackQueryHandler(btn_ref, pattern="^ref$"))
 
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, forward))
 
