@@ -47,6 +47,11 @@ CREATE TABLE IF NOT EXISTS queue (
 
 conn.commit()
 
+# Clear stale queue entries on startup (avoids mismatches from
+# previous/duplicate bot instances)
+cur.execute("DELETE FROM queue")
+conn.commit()
+
 # ---------------- HELPERS ---------------- #
 
 def create_user(uid):
@@ -215,21 +220,38 @@ async def referral_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# ---------------- MESSAGE FORWARDING ---------------- #
+
 async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
 
     chat = in_chat(uid)
 
+    print(f"DEBUG: uid={uid}, in_chat={chat}")
+
     if not chat:
+        await update.message.reply_text(
+            "You are not connected to anyone. Press 🔎 Next to find a partner."
+        )
         return
 
     u1, u2 = chat
     partner = u2 if uid == u1 else u1
 
-    await context.bot.send_message(
-        chat_id=partner,
-        text=update.message.text
-    )
+    try:
+        await context.bot.send_message(
+            chat_id=partner,
+            text=update.message.text
+        )
+        print(f"DEBUG: forwarded message from {uid} to {partner}")
+    except Exception as e:
+        print(f"ERROR: failed to forward message from {uid} to {partner}: {e}")
+        await update.message.reply_text(
+            "⚠️ Could not deliver your message. Your partner may have blocked the bot or left."
+        )
+        end_chat(uid)
+
+
 # ---------------- APP ---------------- #
 
 app = Application.builder().token(TOKEN).build()
