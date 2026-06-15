@@ -192,16 +192,43 @@ async def btn_ref(update, context):
     await q.answer()
     await referral(q.from_user.id, q.message.reply_text)
 
-# ---------------- APP ---------------- #
 
+# ---------------- COMMANDS ---------------- #
+
+async def next_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await next_user(
+        update.effective_user.id,
+        context,
+        update.message.reply_text
+    )
+
+async def end_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    end_chat(uid)
+    remove_queue(uid)
+    await update.message.reply_text("Chat ended")
+
+async def referral_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await referral(
+        update.effective_user.id,
+        update.message.reply_text
+    )
+
+
+# ---------------- APP ---------------- #
 
 app = Application.builder().token(TOKEN).build()
 
+# Commands
 app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("next", next_cmd))
+app.add_handler(CommandHandler("end", end_cmd))
+app.add_handler(CommandHandler("referral", referral_cmd))
+
+# Buttons
 app.add_handler(CallbackQueryHandler(btn_next, pattern="^next$"))
 app.add_handler(CallbackQueryHandler(btn_end, pattern="^end$"))
 app.add_handler(CallbackQueryHandler(btn_ref, pattern="^ref$"))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u, c: None))
 
 print("Bot running...")
 app.run_polling()
