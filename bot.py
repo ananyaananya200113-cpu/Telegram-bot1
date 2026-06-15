@@ -164,7 +164,7 @@ async def referral(uid, send):
     ref = get_ref(uid)
     prem = is_premium(uid)
 
-    link = f"https://t.me/YOUR_BOT_USERNAME?start={uid}"
+    link = f"https://t.me/Annchattingbot?start={uid}"
 
     await send(
         f"💰 Referral System\n\n"
