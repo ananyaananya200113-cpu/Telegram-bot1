@@ -11,9 +11,12 @@ from telegram.ext import (
     filters,
 )
 
-# ---------------- TOKEN (RAILWAY SAFE) ---------------- #
+# ---------------- TOKEN (SAFE) ---------------- #
 
-TOKEN = os.getenv("8838203470:AAGph39y3fybTOEAaHXz0mDzYL5IINY4LVo")
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+
+if not TOKEN:
+    raise Exception("TELEGRAM_TOKEN is not set in environment variables!")
 
 # ---------------- DATABASE ---------------- #
 
@@ -101,7 +104,7 @@ def menu():
 # ---------------- VIP CHECK ---------------- #
 
 async def check_vip(bot, uid):
-    if get_ref(uid) >= 10:
+    if get_ref(uid) >= 10 and not is_premium(uid):
         set_premium(uid)
         await bot.send_message(uid, "💎 VIP UNLOCKED! You reached 10 referrals!")
 
@@ -111,7 +114,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     create_user(uid)
 
-    # referral tracking
     if context.args:
         try:
             ref_id = int(context.args[0])
@@ -162,7 +164,7 @@ async def referral(uid, send):
     ref = get_ref(uid)
     prem = is_premium(uid)
 
-    link = f"https://t.me/Annchattingbot?start={uid}"
+    link = f"https://t.me/YOUR_BOT_USERNAME?start={uid}"
 
     await send(
         f"💰 Referral System\n\n"
@@ -190,31 +192,15 @@ async def btn_ref(update, context):
     await q.answer()
     await referral(q.from_user.id, q.message.reply_text)
 
-# ---------------- CHAT ---------------- #
-
-async def forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-
-    chat = in_chat(uid)
-    if not chat:
-        return
-
-    u1, u2 = chat
-    partner = u2 if uid == u1 else u1
-
-    await context.bot.send_message(partner, update.message.text)
-
 # ---------------- APP ---------------- #
 
 app = Application.builder().token(TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
-
 app.add_handler(CallbackQueryHandler(btn_next, pattern="^next$"))
 app.add_handler(CallbackQueryHandler(btn_end, pattern="^end$"))
 app.add_handler(CallbackQueryHandler(btn_ref, pattern="^ref$"))
-
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, forward))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u, c: None))
 
 print("Bot running...")
 app.run_polling()
