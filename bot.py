@@ -14,11 +14,11 @@ from telegram.ext import (
 )
 # ---------------- CONFIGURATION ---------------- #
 # CHANNEL CONFIG
-CHANNEL_USERNAME = "@AnnAnonymousChatbot"  # 📢 Official channel username (must start with @)
+CHANNEL_USERNAME = "@AnnChattingbot"  # 📢 Official channel username (must start with @)
 # UPI CONFIG
-UPI_ID = "your-upi-id@okaxis"  # 💳 UPI Address for payments (GPay, PhonePe, Paytm)
+UPI_ID = "123"  # 💳 UPI Address for payments (GPay, PhonePe, Paytm)
 # SUPPORT CONFIG
-SUPPORT_CONTACT = "@YourSupportUsername"  # 📥 Support Telegram username for payment screenshot verification
+SUPPORT_CONTACT = "@CEOANNCHATTINGBOT"  # 📥 Support Telegram username for payment screenshot verification
 # ---------------- TOKEN (SAFE) ---------------- #
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 if not TOKEN:
