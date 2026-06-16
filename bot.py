@@ -11,13 +11,20 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+
 # ---------------- TOKEN (SAFE) ---------------- #
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 if not TOKEN:
     raise Exception("TELEGRAM_TOKEN is not set in environment variables!")
+
+# ---------------- ADMIN CONFIG ---------------- #
+# To get your ID: open Telegram → search @userinfobot → send /start
+ADMIN_ID = 8550879731  # ⚠️ Replace this with your real Telegram numeric ID
+
 # ---------------- DATABASE ---------------- #
 conn = sqlite3.connect("anon_chat.db", check_same_thread=False)
 cur = conn.cursor()
+
 cur.execute("""
 CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
@@ -38,14 +45,14 @@ CREATE TABLE IF NOT EXISTS queue (
 )
 """)
 conn.commit()
-# Helper to dynamically add columns for profiles if they don't exist
+
 def add_column_if_not_exists(table, column, definition):
     try:
         cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
         conn.commit()
     except sqlite3.OperationalError:
         pass
-# Setup database columns for new profile fields
+
 add_column_if_not_exists("users", "gender", "TEXT DEFAULT 'Not set'")
 add_column_if_not_exists("users", "age", "INTEGER DEFAULT 0")
 add_column_if_not_exists("users", "total_dialogs", "INTEGER DEFAULT 0")
@@ -53,81 +60,129 @@ add_column_if_not_exists("users", "today_dialogs", "INTEGER DEFAULT 0")
 add_column_if_not_exists("users", "last_dialog_date", "TEXT DEFAULT ''")
 add_column_if_not_exists("users", "sent_messages", "INTEGER DEFAULT 0")
 add_column_if_not_exists("users", "received_messages", "INTEGER DEFAULT 0")
-# Clear stale queue entries on startup (avoids mismatches from
-# previous/duplicate bot instances)
+
+# Clear stale queue on startup
 cur.execute("DELETE FROM queue")
 conn.commit()
+
 # ---------------- STATE MACHINE ---------------- #
-user_states = {}  # In-memory dictionary to track current state of users (e.g. 'awaiting_age')
+user_states = {}
+
 # ---------------- HELPERS ---------------- #
 def create_user(uid):
     cur.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (uid,))
     conn.commit()
+
 def is_premium(uid):
     cur.execute("SELECT premium FROM users WHERE user_id=?", (uid,))
     r = cur.fetchone()
     return r and r[0] == 1
+
 def get_ref(uid):
     cur.execute("SELECT referral_count FROM users WHERE user_id=?", (uid,))
     r = cur.fetchone()
     return r[0] if r else 0
+
 def add_ref(uid):
     count = get_ref(uid) + 1
     cur.execute("UPDATE users SET referral_count=? WHERE user_id=?", (count, uid))
     conn.commit()
     return count
+
 def set_premium(uid):
     cur.execute("UPDATE users SET premium=1 WHERE user_id=?", (uid,))
     conn.commit()
+
 def in_chat(uid):
     cur.execute("SELECT * FROM active_chats WHERE user1=? OR user2=?", (uid, uid))
     return cur.fetchone()
+
 def add_queue(uid):
     ts = int(time.time())
     if is_premium(uid):
         ts -= 10000
     cur.execute("INSERT OR REPLACE INTO queue VALUES (?,?)", (uid, ts))
     conn.commit()
+
 def remove_queue(uid):
     cur.execute("DELETE FROM queue WHERE user_id=?", (uid,))
     conn.commit()
+
 def end_chat(uid):
     cur.execute("DELETE FROM active_chats WHERE user1=? OR user2=?", (uid, uid))
     conn.commit()
+
 def get_user_profile(uid):
     cur.execute("""
-        SELECT user_id, gender, age, total_dialogs, today_dialogs, last_dialog_date, sent_messages, received_messages 
+        SELECT user_id, gender, age, total_dialogs, today_dialogs, last_dialog_date, sent_messages, received_messages
         FROM users WHERE user_id=?
     """, (uid,))
     return cur.fetchone()
+
 def update_profile_gender(uid, gender):
     cur.execute("UPDATE users SET gender=? WHERE user_id=?", (gender, uid))
     conn.commit()
+
 def update_profile_age(uid, age):
     cur.execute("UPDATE users SET age=? WHERE user_id=?", (age, uid))
     conn.commit()
+
 def increment_dialogs(uid):
     today_str = datetime.date.today().isoformat()
     profile = get_user_profile(uid)
     if not profile:
         create_user(uid)
         profile = get_user_profile(uid)
-    
-    # Column mapping:
-    # 0: user_id, 1: gender, 2: age, 3: total_dialogs, 4: today_dialogs, 5: last_dialog_date
     total = profile[3] + 1
     last_date = profile[5]
-    if last_date != today_str:
-        today = 1
-    else:
-        today = profile[4] + 1
-        
+    today = 1 if last_date != today_str else profile[4] + 1
     cur.execute("""
-        UPDATE users 
-        SET total_dialogs=?, today_dialogs=?, last_dialog_date=? 
+        UPDATE users
+        SET total_dialogs=?, today_dialogs=?, last_dialog_date=?
         WHERE user_id=?
     """, (total, today, today_str, uid))
     conn.commit()
+
+# ---------------- ADMIN HELPERS ---------------- #
+def is_admin(uid):
+    return uid == ADMIN_ID
+
+def get_all_users(limit=50, offset=0):
+    cur.execute("""
+        SELECT user_id, gender, age, total_dialogs, today_dialogs,
+               sent_messages, received_messages, referral_count, premium, last_dialog_date
+        FROM users
+        ORDER BY total_dialogs DESC
+        LIMIT ? OFFSET ?
+    """, (limit, offset))
+    return cur.fetchall()
+
+def get_user_count():
+    cur.execute("SELECT COUNT(*) FROM users")
+    return cur.fetchone()[0]
+
+def get_active_chat_count():
+    cur.execute("SELECT COUNT(*) FROM active_chats")
+    return cur.fetchone()[0]
+
+def get_queue_count():
+    cur.execute("SELECT COUNT(*) FROM queue")
+    return cur.fetchone()[0]
+
+def get_vip_count():
+    cur.execute("SELECT COUNT(*) FROM users WHERE premium=1")
+    return cur.fetchone()[0]
+
+def get_active_today_count():
+    today_str = datetime.date.today().isoformat()
+    cur.execute("SELECT COUNT(*) FROM users WHERE last_dialog_date=?", (today_str,))
+    return cur.fetchone()[0]
+
+def get_total_messages():
+    cur.execute("SELECT SUM(sent_messages) FROM users")
+    result = cur.fetchone()[0]
+    return result or 0
+
 # ---------------- UI ---------------- #
 def menu():
     return InlineKeyboardMarkup([
@@ -136,27 +191,32 @@ def menu():
         [InlineKeyboardButton("👤 Profile", callback_data="profile"),
          InlineKeyboardButton("💰 Referral", callback_data="ref")]
     ])
+
 def profile_menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("👫 Set Gender", callback_data="set_gender"),
          InlineKeyboardButton("🔞 Set Age", callback_data="set_age")],
         [InlineKeyboardButton("🔙 Back to Main Menu", callback_data="back_to_menu")]
     ])
+
 def gender_menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("👨 Male", callback_data="gender_M"),
          InlineKeyboardButton("👩 Female", callback_data="gender_F")],
         [InlineKeyboardButton("🔙 Back to Profile", callback_data="profile")]
     ])
+
 def back_only_menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔙 Back to Profile", callback_data="profile")]
     ])
+
 # ---------------- VIP CHECK ---------------- #
 async def check_vip(bot, uid):
     if get_ref(uid) >= 10 and not is_premium(uid):
         set_premium(uid)
         await bot.send_message(uid, "💎 VIP UNLOCKED! You reached 10 referrals!")
+
 # ---------------- START ---------------- #
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -170,22 +230,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
     await update.message.reply_text("Welcome 👋", reply_markup=menu())
+
 # ---------------- MATCHING ---------------- #
 async def next_user(uid, context, send):
-    # First, handle skipping the current chat if the user is in one
     chat = in_chat(uid)
     if chat:
         u1, u2 = chat
         partner = u2 if uid == u1 else u1
         end_chat(uid)
-        
         try:
             await context.bot.send_message(partner, "🤚 Your partner left the chat", reply_markup=menu())
         except Exception as e:
             print(f"ERROR: failed to notify partner on skip: {e}")
-            
         await send("🤚 You left the chat")
-    # Queue up the user and notify
+
     add_queue(uid)
     await send("Searching...")
     cur.execute("""
@@ -197,15 +255,15 @@ async def next_user(uid, context, send):
     row = cur.fetchone()
     if not row:
         return
+
     partner = row[0]
     remove_queue(uid)
     remove_queue(partner)
     cur.execute("INSERT INTO active_chats VALUES (?,?)", (uid, partner))
     conn.commit()
-    # Increment dialog counts for both users
     increment_dialogs(uid)
     increment_dialogs(partner)
-    # Success messages
+
     match_text = (
         "🎉 Match successful!\n\n"
         "/next – End and start a new match\n"
@@ -213,6 +271,7 @@ async def next_user(uid, context, send):
     )
     await context.bot.send_message(uid, match_text, reply_markup=menu())
     await context.bot.send_message(partner, match_text, reply_markup=menu())
+
 # ---------------- REFERRAL ---------------- #
 async def referral(uid, send):
     ref = get_ref(uid)
@@ -224,42 +283,41 @@ async def referral(uid, send):
         f"⭐ Status: {'VIP' if prem else 'FREE'}\n\n"
         f"Link:\n{link}"
     )
+
 # ---------------- BUTTONS ---------------- #
 async def btn_next(update, context):
     q = update.callback_query
     await q.answer()
     uid = q.from_user.id
-    user_states.pop(uid, None) # Cancel profile editing state if any
+    user_states.pop(uid, None)
     await next_user(uid, context, q.message.reply_text)
+
 async def btn_end(update, context):
     q = update.callback_query
     await q.answer()
     uid = q.from_user.id
-    user_states.pop(uid, None) # Cancel profile editing state if any
+    user_states.pop(uid, None)
     await end_chat_flow(uid, context, q.message.reply_text)
+
 async def btn_ref(update, context):
     q = update.callback_query
     await q.answer()
     uid = q.from_user.id
-    user_states.pop(uid, None) # Cancel profile editing state if any
+    user_states.pop(uid, None)
     await referral(uid, q.message.reply_text)
+
 # ---------------- PROFILE SYSTEM & BUTTONS ---------------- #
 async def show_profile(uid, send_or_edit, reply_markup=None):
     profile = get_user_profile(uid)
     if not profile:
         create_user(uid)
         profile = get_user_profile(uid)
-        
     _, gender, age, total_dialogs, today_dialogs, last_dialog_date, sent_messages, received_messages = profile
-    
-    # Check if today's dialog count is stale
     today_str = datetime.date.today().isoformat()
     if last_dialog_date != today_str:
         today_dialogs = 0
-        
     gender_display = gender if gender else "Not set"
     age_display = str(age) if (age and age > 0) else "Not set"
-    
     profile_text = (
         f"#️⃣ ID — {uid}\n\n"
         f"👫 Gender — {gender_display}\n"
@@ -271,51 +329,53 @@ async def show_profile(uid, send_or_edit, reply_markup=None):
         f"├ Sent: {sent_messages}\n"
         f"└ Received: {received_messages}"
     )
-    
     await send_or_edit(profile_text, reply_markup=reply_markup or profile_menu())
+
 async def btn_profile(update, context):
     q = update.callback_query
     await q.answer()
     uid = q.from_user.id
-    user_states.pop(uid, None) # Clear any states
-    
+    user_states.pop(uid, None)
     async def edit_msg(text, reply_markup):
         await q.message.edit_text(text, reply_markup=reply_markup)
-        
     await show_profile(uid, edit_msg)
+
 async def btn_set_gender(update, context):
     q = update.callback_query
     await q.answer()
     await q.message.edit_text("Select your gender:", reply_markup=gender_menu())
+
 async def btn_gender_select(update, context):
     q = update.callback_query
     await q.answer()
     uid = q.from_user.id
-    gender_code = q.data.split("_")[1] # 'M' or 'F'
+    gender_code = q.data.split("_")[1]
     gender_str = "M" if gender_code == "M" else "F"
     update_profile_gender(uid, gender_str)
-    
     async def edit_msg(text, reply_markup):
         await q.message.edit_text(f"✅ Gender set to {gender_str}!\n\n" + text, reply_markup=reply_markup)
-        
     await show_profile(uid, edit_msg)
+
 async def btn_set_age(update, context):
     q = update.callback_query
     await q.answer()
     uid = q.from_user.id
     user_states[uid] = "awaiting_age"
     await q.message.edit_text("🔢 Please send your age (a number between 1 and 99):", reply_markup=back_only_menu())
+
 async def btn_back_to_menu(update, context):
     q = update.callback_query
     await q.answer()
     uid = q.from_user.id
     user_states.pop(uid, None)
     await q.message.edit_text("Welcome 👋", reply_markup=menu())
+
 # ---------------- COMMANDS ---------------- #
 async def next_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     user_states.pop(uid, None)
     await next_user(uid, context, update.message.reply_text)
+
 async def end_chat_flow(uid, context, send):
     chat = in_chat(uid)
     end_chat(uid)
@@ -330,51 +390,284 @@ async def end_chat_flow(uid, context, send):
         await send("🤚 You left the chat")
     else:
         await send("You are not in an active chat.")
+
 async def end_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     user_states.pop(uid, None)
     await end_chat_flow(uid, context, update.message.reply_text)
+
 async def referral_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     user_states.pop(uid, None)
     await referral(uid, update.message.reply_text)
+
 async def profile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     user_states.pop(uid, None)
-    
     async def reply_msg(text, reply_markup):
         await update.message.reply_text(text, reply_markup=reply_markup)
-        
     await show_profile(uid, reply_msg)
+
+# ---------------- ADMIN COMMANDS ---------------- #
+async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /stats — Show overall bot statistics (admin only)
+    """
+    uid = update.effective_user.id
+    if not is_admin(uid):
+        await update.message.reply_text("⛔ Unauthorized.")
+        return
+
+    total       = get_user_count()
+    vip         = get_vip_count()
+    active_today= get_active_today_count()
+    active_chats= get_active_chat_count()
+    in_queue    = get_queue_count()
+    total_msgs  = get_total_messages()
+
+    await update.message.reply_text(
+        f"📊 *Bot Statistics*\n\n"
+        f"👥 Total Users: `{total}`\n"
+        f"💎 VIP Users: `{vip}`\n"
+        f"🟢 Active Today: `{active_today}`\n"
+        f"💬 Active Chats: `{active_chats}`\n"
+        f"🔎 In Queue: `{in_queue}`\n"
+        f"✉️ Total Messages Sent: `{total_msgs}`",
+        parse_mode="Markdown"
+    )
+
+
+async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /users [page] — List all users paginated, 10 per page (admin only)
+    Example: /users 2  →  shows users 11–20
+    """
+    uid = update.effective_user.id
+    if not is_admin(uid):
+        await update.message.reply_text("⛔ Unauthorized.")
+        return
+
+    # Parse optional page number
+    page = 1
+    if context.args:
+        try:
+            page = max(1, int(context.args[0]))
+        except ValueError:
+            pass
+
+    page_size = 10
+    offset    = (page - 1) * page_size
+    users     = get_all_users(limit=page_size, offset=offset)
+    total     = get_user_count()
+    total_pages = max(1, (total + page_size - 1) // page_size)
+
+    # Summary header
+    await update.message.reply_text(
+        f"📊 *Bot Summary*\n"
+        f"👥 Total Users: `{total}` | 💬 Active Chats: `{get_active_chat_count()}` | 🔎 In Queue: `{get_queue_count()}`\n"
+        f"📄 Page `{page}` / `{total_pages}`",
+        parse_mode="Markdown"
+    )
+
+    if not users:
+        await update.message.reply_text("No users found.")
+        return
+
+    lines = []
+    for u in users:
+        user_id, gender, age, total_d, today_d, sent, received, refs, prem, last_date = u
+        status       = "💎" if prem else "👤"
+        gender_icon  = "👨" if gender == "M" else "👩" if gender == "F" else "❓"
+        age_display  = str(age) if age and age > 0 else "N/A"
+        last_display = last_date if last_date else "Never"
+        lines.append(
+            f"{status} `{user_id}`\n"
+            f"  {gender_icon} {gender or 'N/A'} | 🔞 {age_display} | 👥 Refs: {refs}\n"
+            f"  💬 Dialogs: {total_d} (Today: {today_d})\n"
+            f"  ✉️ Sent: {sent} | Rcvd: {received}\n"
+            f"  📅 Last active: {last_display}"
+        )
+
+    await update.message.reply_text("\n\n".join(lines), parse_mode="Markdown")
+
+    if total_pages > 1:
+        await update.message.reply_text(
+            f"📄 Page {page}/{total_pages}  →  Use `/users {page + 1}` for next page" if page < total_pages
+            else f"✅ Last page. Use `/users {page - 1}` to go back.",
+            parse_mode="Markdown"
+        )
+
+
+async def admin_find_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /finduser <user_id> — Look up a specific user by their Telegram ID (admin only)
+    Example: /finduser 987654321
+    """
+    uid = update.effective_user.id
+    if not is_admin(uid):
+        await update.message.reply_text("⛔ Unauthorized.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: `/finduser <user_id>`", parse_mode="Markdown")
+        return
+
+    try:
+        target_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("⚠️ Invalid user ID. It must be a number.")
+        return
+
+    profile = get_user_profile(target_id)
+    if not profile:
+        await update.message.reply_text("❌ User not found in database.")
+        return
+
+    user_id, gender, age, total_d, today_d, last_date, sent, received = profile
+    refs  = get_ref(target_id)
+    prem  = is_premium(target_id)
+    in_c  = bool(in_chat(target_id))
+    in_q  = bool(cur.execute("SELECT 1 FROM queue WHERE user_id=?", (target_id,)).fetchone())
+
+    status_line = "💎 VIP" if prem else "👤 Free"
+    if in_c:
+        activity = "💬 Currently in chat"
+    elif in_q:
+        activity = "🔎 In matchmaking queue"
+    else:
+        activity = "💤 Idle"
+
+    await update.message.reply_text(
+        f"🔍 *User Details*\n\n"
+        f"🆔 ID: `{user_id}`\n"
+        f"👫 Gender: {gender or 'Not set'}\n"
+        f"🔞 Age: {age if age and age > 0 else 'Not set'}\n"
+        f"⭐ Status: {status_line}\n"
+        f"📡 Activity: {activity}\n\n"
+        f"💬 Total Dialogs: `{total_d}`\n"
+        f"📅 Today's Dialogs: `{today_d}`\n"
+        f"📆 Last Active: {last_date or 'Never'}\n\n"
+        f"✉️ Sent: `{sent}` | Received: `{received}`\n"
+        f"👥 Referrals: `{refs}`",
+        parse_mode="Markdown"
+    )
+
+
+async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /broadcast <message> — Send a message to ALL users (admin only)
+    Example: /broadcast Hello everyone! Bot updated 🎉
+    """
+    uid = update.effective_user.id
+    if not is_admin(uid):
+        await update.message.reply_text("⛔ Unauthorized.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: `/broadcast <your message>`", parse_mode="Markdown")
+        return
+
+    message = " ".join(context.args)
+    cur.execute("SELECT user_id FROM users")
+    all_users = cur.fetchall()
+
+    sent_count  = 0
+    fail_count  = 0
+
+    await update.message.reply_text(f"📢 Broadcasting to {len(all_users)} users...")
+
+    for (user_id,) in all_users:
+        try:
+            await context.bot.send_message(user_id, f"📢 *Announcement*\n\n{message}", parse_mode="Markdown")
+            sent_count += 1
+        except Exception:
+            fail_count += 1
+
+    await update.message.reply_text(
+        f"✅ Broadcast complete!\n"
+        f"📨 Sent: {sent_count}\n"
+        f"❌ Failed: {fail_count} (blocked/deactivated accounts)"
+    )
+
+
+async def admin_setpremium(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /setpremium <user_id> — Manually grant VIP to a user (admin only)
+    Example: /setpremium 987654321
+    """
+    uid = update.effective_user.id
+    if not is_admin(uid):
+        await update.message.reply_text("⛔ Unauthorized.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: `/setpremium <user_id>`", parse_mode="Markdown")
+        return
+
+    try:
+        target_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("⚠️ Invalid user ID.")
+        return
+
+    profile = get_user_profile(target_id)
+    if not profile:
+        await update.message.reply_text("❌ User not found.")
+        return
+
+    set_premium(target_id)
+    await update.message.reply_text(f"💎 User `{target_id}` has been granted VIP status!", parse_mode="Markdown")
+    try:
+        await context.bot.send_message(target_id, "💎 You have been granted VIP status by the admin!")
+    except Exception:
+        pass
+
+
+async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /adminhelp — Show all admin commands
+    """
+    uid = update.effective_user.id
+    if not is_admin(uid):
+        await update.message.reply_text("⛔ Unauthorized.")
+        return
+
+    await update.message.reply_text(
+        "🛠 *Admin Commands*\n\n"
+        "`/stats` — Bot statistics overview\n"
+        "`/users [page]` — List all users (10 per page)\n"
+        "`/finduser <id>` — Look up a specific user\n"
+        "`/setpremium <id>` — Grant VIP to a user\n"
+        "`/broadcast <msg>` — Send message to all users\n"
+        "`/adminhelp` — Show this help message",
+        parse_mode="Markdown"
+    )
+
 # ---------------- MESSAGE HANDLER (FORWARDING & STATE CAPTURE) ---------------- #
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     text = update.message.text
-    
-    # Check if we are awaiting profile input
+
     if user_states.get(uid) == "awaiting_age":
         try:
             age = int(text)
             if 1 <= age <= 99:
                 update_profile_age(uid, age)
-                user_states.pop(uid, None) # Clear state
-                
+                user_states.pop(uid, None)
                 async def reply_msg(msg_text, reply_markup):
                     await update.message.reply_text(f"✅ Age set to {age}!\n\n" + msg_text, reply_markup=reply_markup)
-                    
                 await show_profile(uid, reply_msg)
                 return
         except ValueError:
             pass
-            
         await update.message.reply_text(
             "⚠️ Invalid age. Please enter a valid number (e.g. 24) or use the 'Back to Profile' button to cancel:",
             reply_markup=back_only_menu()
         )
         return
-        
-    # Default to message forwarding
+
     await forward_message(update, context)
+
 # ---------------- MESSAGE FORWARDING ---------------- #
 async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -388,16 +681,10 @@ async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u1, u2 = chat
     partner = u2 if uid == u1 else u1
     try:
-        await context.bot.send_message(
-            chat_id=partner,
-            text=update.message.text
-        )
-        
-        # Increment message counters
+        await context.bot.send_message(chat_id=partner, text=update.message.text)
         cur.execute("UPDATE users SET sent_messages = sent_messages + 1 WHERE user_id=?", (uid,))
         cur.execute("UPDATE users SET received_messages = received_messages + 1 WHERE user_id=?", (partner,))
         conn.commit()
-        
         print(f"DEBUG: forwarded message from {uid} to {partner}")
     except Exception as e:
         print(f"ERROR: failed to forward message from {uid} to {partner}: {e}")
@@ -405,15 +692,26 @@ async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⚠️ Could not deliver your message. Your partner may have blocked the bot or left."
         )
         end_chat(uid)
+
 # ---------------- APP ---------------- #
 app = Application.builder().token(TOKEN).build()
-# Commands
+
+# User commands
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("next", next_cmd))
 app.add_handler(CommandHandler("end", end_cmd))
-app.add_handler(CommandHandler("stop", end_cmd)) # Support /stop to end chat
+app.add_handler(CommandHandler("stop", end_cmd))
 app.add_handler(CommandHandler("referral", referral_cmd))
 app.add_handler(CommandHandler("profile", profile_cmd))
+
+# Admin commands
+app.add_handler(CommandHandler("stats", admin_stats))
+app.add_handler(CommandHandler("users", admin_users))
+app.add_handler(CommandHandler("finduser", admin_find_user))
+app.add_handler(CommandHandler("setpremium", admin_setpremium))
+app.add_handler(CommandHandler("broadcast", admin_broadcast))
+app.add_handler(CommandHandler("adminhelp", admin_help))
+
 # Callback Queries
 app.add_handler(CallbackQueryHandler(btn_next, pattern="^next$"))
 app.add_handler(CallbackQueryHandler(btn_end, pattern="^end$"))
@@ -423,13 +721,10 @@ app.add_handler(CallbackQueryHandler(btn_set_gender, pattern="^set_gender$"))
 app.add_handler(CallbackQueryHandler(btn_gender_select, pattern="^gender_(M|F)$"))
 app.add_handler(CallbackQueryHandler(btn_set_age, pattern="^set_age$"))
 app.add_handler(CallbackQueryHandler(btn_back_to_menu, pattern="^back_to_menu$"))
-# Message Handlers
-app.add_handler(
-    MessageHandler(
-        filters.TEXT & ~filters.COMMAND,
-        handle_message
-    )
-)
+
+# Message Handler
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
 if __name__ == "__main__":
     print("Bot running...")
     app.run_polling()
