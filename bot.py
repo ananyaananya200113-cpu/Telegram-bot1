@@ -1,3 +1,9 @@
+Viewed bot.py:1-600
+Viewed bot.py:601-797
+
+Here is the full, complete, optimized code containing all the user profile systems, leaving/skipping flows, matchmaking priorities, premium preference configurations, and administrative command integrations:
+
+```python
 import os
 import sqlite3
 import time
@@ -46,6 +52,7 @@ CREATE TABLE IF NOT EXISTS queue (
 """)
 conn.commit()
 
+# Helper to dynamically add columns for profiles if they don't exist
 def add_column_if_not_exists(table, column, definition):
     try:
         cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
@@ -53,6 +60,7 @@ def add_column_if_not_exists(table, column, definition):
     except sqlite3.OperationalError:
         pass
 
+# Setup database columns for profile and preference fields
 add_column_if_not_exists("users", "gender", "TEXT DEFAULT 'Not set'")
 add_column_if_not_exists("users", "age", "INTEGER DEFAULT 0")
 add_column_if_not_exists("users", "total_dialogs", "INTEGER DEFAULT 0")
@@ -60,6 +68,7 @@ add_column_if_not_exists("users", "today_dialogs", "INTEGER DEFAULT 0")
 add_column_if_not_exists("users", "last_dialog_date", "TEXT DEFAULT ''")
 add_column_if_not_exists("users", "sent_messages", "INTEGER DEFAULT 0")
 add_column_if_not_exists("users", "received_messages", "INTEGER DEFAULT 0")
+add_column_if_not_exists("users", "premium_preference", "TEXT DEFAULT 'Any'")
 
 # Clear stale queue on startup
 cur.execute("DELETE FROM queue")
@@ -114,7 +123,7 @@ def end_chat(uid):
 
 def get_user_profile(uid):
     cur.execute("""
-        SELECT user_id, gender, age, total_dialogs, today_dialogs, last_dialog_date, sent_messages, received_messages
+        SELECT user_id, gender, age, total_dialogs, today_dialogs, last_dialog_date, sent_messages, received_messages, premium_preference
         FROM users WHERE user_id=?
     """, (uid,))
     return cur.fetchone()
@@ -125,6 +134,10 @@ def update_profile_gender(uid, gender):
 
 def update_profile_age(uid, age):
     cur.execute("UPDATE users SET age=? WHERE user_id=?", (age, uid))
+    conn.commit()
+
+def update_premium_preference(uid, pref):
+    cur.execute("UPDATE users SET premium_preference=? WHERE user_id=?", (pref, uid))
     conn.commit()
 
 def increment_dialogs(uid):
@@ -192,17 +205,28 @@ def menu():
          InlineKeyboardButton("💰 Referral", callback_data="ref")]
     ])
 
-def profile_menu():
-    return InlineKeyboardMarkup([
+def profile_menu(is_vip=False):
+    buttons = [
         [InlineKeyboardButton("👫 Set Gender", callback_data="set_gender"),
-         InlineKeyboardButton("🔞 Set Age", callback_data="set_age")],
-        [InlineKeyboardButton("🔙 Back to Main Menu", callback_data="back_to_menu")]
-    ])
+         InlineKeyboardButton("🔞 Set Age", callback_data="set_age")]
+    ]
+    if is_vip:
+        buttons.append([InlineKeyboardButton("🎯 Set Preference", callback_data="set_pref")])
+    buttons.append([InlineKeyboardButton("🔙 Back to Main Menu", callback_data="back_to_menu")])
+    return InlineKeyboardMarkup(buttons)
 
 def gender_menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("👨 Male", callback_data="gender_M"),
          InlineKeyboardButton("👩 Female", callback_data="gender_F")],
+        [InlineKeyboardButton("🔙 Back to Profile", callback_data="profile")]
+    ])
+
+def preference_selection_menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("👨 Male", callback_data="setpref_M"),
+         InlineKeyboardButton("👩 Female", callback_data="setpref_F")],
+        [InlineKeyboardButton("🟢 Any", callback_data="setpref_Any")],
         [InlineKeyboardButton("🔙 Back to Profile", callback_data="profile")]
     ])
 
@@ -216,6 +240,17 @@ async def check_vip(bot, uid):
     if get_ref(uid) >= 10 and not is_premium(uid):
         set_premium(uid)
         await bot.send_message(uid, "💎 VIP UNLOCKED! You reached 10 referrals!")
+        await ask_preference(bot, uid)
+
+async def ask_preference(bot, uid):
+    text = (
+        "💎 *VIP Preference Setup*\n\n"
+        "Please select your preferred gender for matching. The bot will prioritize connecting you with this gender first!"
+    )
+    try:
+        await bot.send_message(uid, text, reply_markup=preference_selection_menu(), parse_mode="Markdown")
+    except Exception as e:
+        print(f"ERROR: failed to send preference prompt to {uid}: {e}")
 
 # ---------------- START ---------------- #
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -244,23 +279,56 @@ async def next_user(uid, context, send):
             print(f"ERROR: failed to notify partner on skip: {e}")
         await send("🤚 You left the chat")
 
-    add_queue(uid)
-    await send("Searching...")
+    # Fetch searching user details
+    cur.execute("SELECT gender, premium, premium_preference FROM users WHERE user_id=?", (uid,))
+    row_a = cur.fetchone()
+    gender_a = row_a[0] if row_a else 'Not set'
+    premium_a = row_a[1] if row_a else 0
+    pref_a = row_a[2] if row_a else 'Any'
+
+    # Get active matchmaking candidates in queue
     cur.execute("""
-        SELECT user_id FROM queue
-        WHERE user_id != ?
-        ORDER BY timestamp ASC
-        LIMIT 1
+        SELECT q.user_id, u.gender, u.premium, u.premium_preference, q.timestamp
+        FROM queue q
+        JOIN users u ON q.user_id = u.user_id
+        WHERE q.user_id != ?
     """, (uid,))
-    row = cur.fetchone()
-    if not row:
+    candidates = cur.fetchall()
+
+    if not candidates:
+        add_queue(uid)
+        await send("Searching...")
         return
 
-    partner = row[0]
+    # Score candidates based on preference match compatibility
+    scored_candidates = []
+    for cid, c_gender, c_premium, c_pref, c_ts in candidates:
+        # A's preference score
+        if premium_a == 1 and pref_a in ('M', 'F'):
+            a_score = 2 if c_gender == pref_a else 0
+        else:
+            a_score = 1
+
+        # Candidate's preference score
+        if c_premium == 1 and c_pref in ('M', 'F'):
+            b_score = 2 if gender_a == c_pref else 0
+        else:
+            b_score = 1
+
+        total_score = a_score + b_score
+        scored_candidates.append((total_score, c_ts, cid))
+
+    # Sort: highest score first, then oldest queue timestamp first
+    scored_candidates.sort(key=lambda x: (-x[0], x[1]))
+    
+    partner = scored_candidates[0][2]
+
+    # Dequeue both and create the chat
     remove_queue(uid)
     remove_queue(partner)
     cur.execute("INSERT INTO active_chats VALUES (?,?)", (uid, partner))
     conn.commit()
+
     increment_dialogs(uid)
     increment_dialogs(partner)
 
@@ -312,16 +380,21 @@ async def show_profile(uid, send_or_edit, reply_markup=None):
     if not profile:
         create_user(uid)
         profile = get_user_profile(uid)
-    _, gender, age, total_dialogs, today_dialogs, last_dialog_date, sent_messages, received_messages = profile
+    _, gender, age, total_dialogs, today_dialogs, last_dialog_date, sent_messages, received_messages, pref = profile
     today_str = datetime.date.today().isoformat()
     if last_dialog_date != today_str:
         today_dialogs = 0
     gender_display = gender if gender else "Not set"
     age_display = str(age) if (age and age > 0) else "Not set"
+    
+    is_vip = is_premium(uid)
+    pref_display = pref if is_vip else "Locked 🔒"
+
     profile_text = (
         f"#️⃣ ID — {uid}\n\n"
         f"👫 Gender — {gender_display}\n"
-        f"🔞 Age — {age_display}\n\n"
+        f"🔞 Age — {age_display}\n"
+        f"🎯 Preference — {pref_display}\n\n"
         f"⭐️ Dialogs\n"
         f"├ Total: {total_dialogs}\n"
         f"└ Today: {today_dialogs}\n\n"
@@ -329,7 +402,7 @@ async def show_profile(uid, send_or_edit, reply_markup=None):
         f"├ Sent: {sent_messages}\n"
         f"└ Received: {received_messages}"
     )
-    await send_or_edit(profile_text, reply_markup=reply_markup or profile_menu())
+    await send_or_edit(profile_text, reply_markup=reply_markup or profile_menu(is_vip=is_vip))
 
 async def btn_profile(update, context):
     q = update.callback_query
@@ -362,6 +435,29 @@ async def btn_set_age(update, context):
     uid = q.from_user.id
     user_states[uid] = "awaiting_age"
     await q.message.edit_text("🔢 Please send your age (a number between 1 and 99):", reply_markup=back_only_menu())
+
+async def btn_set_preference(update, context):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    if not is_premium(uid):
+        await q.message.reply_text(
+            "🔒 Setting matching preferences is a VIP feature!\n\n"
+            "Refer 10 friends to unlock VIP status automatically.",
+            reply_markup=menu()
+        )
+        return
+    await q.message.edit_text("Select your preferred gender for matching:", reply_markup=preference_selection_menu())
+
+async def btn_preference_select(update, context):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    pref_code = q.data.split("pref_")[1]  # 'M', 'F', or 'Any'
+    update_premium_preference(uid, pref_code)
+    async def edit_msg(text, reply_markup):
+        await q.message.edit_text(f"✅ Preference set to {pref_code}!\n\n" + text, reply_markup=reply_markup)
+    await show_profile(uid, edit_msg)
 
 async def btn_back_to_menu(update, context):
     q = update.callback_query
@@ -410,9 +506,6 @@ async def profile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------- ADMIN COMMANDS ---------------- #
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /stats — Show overall bot statistics (admin only)
-    """
     uid = update.effective_user.id
     if not is_admin(uid):
         await update.message.reply_text("⛔ Unauthorized.")
@@ -436,18 +529,12 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-
 async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /users [page] — List all users paginated, 10 per page (admin only)
-    Example: /users 2  →  shows users 11–20
-    """
     uid = update.effective_user.id
     if not is_admin(uid):
         await update.message.reply_text("⛔ Unauthorized.")
         return
 
-    # Parse optional page number
     page = 1
     if context.args:
         try:
@@ -461,7 +548,6 @@ async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total     = get_user_count()
     total_pages = max(1, (total + page_size - 1) // page_size)
 
-    # Summary header
     await update.message.reply_text(
         f"📊 *Bot Summary*\n"
         f"👥 Total Users: `{total}` | 💬 Active Chats: `{get_active_chat_count()}` | 🔎 In Queue: `{get_queue_count()}`\n"
@@ -497,12 +583,7 @@ async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
-
 async def admin_find_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /finduser <user_id> — Look up a specific user by their Telegram ID (admin only)
-    Example: /finduser 987654321
-    """
     uid = update.effective_user.id
     if not is_admin(uid):
         await update.message.reply_text("⛔ Unauthorized.")
@@ -523,7 +604,7 @@ async def admin_find_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ User not found in database.")
         return
 
-    user_id, gender, age, total_d, today_d, last_date, sent, received = profile
+    user_id, gender, age, total_d, today_d, last_date, sent, received, pref = profile
     refs  = get_ref(target_id)
     prem  = is_premium(target_id)
     in_c  = bool(in_chat(target_id))
@@ -542,6 +623,7 @@ async def admin_find_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🆔 ID: `{user_id}`\n"
         f"👫 Gender: {gender or 'Not set'}\n"
         f"🔞 Age: {age if age and age > 0 else 'Not set'}\n"
+        f"🎯 Preference: {pref or 'Any'}\n"
         f"⭐ Status: {status_line}\n"
         f"📡 Activity: {activity}\n\n"
         f"💬 Total Dialogs: `{total_d}`\n"
@@ -552,12 +634,7 @@ async def admin_find_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-
 async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /broadcast <message> — Send a message to ALL users (admin only)
-    Example: /broadcast Hello everyone! Bot updated 🎉
-    """
     uid = update.effective_user.id
     if not is_admin(uid):
         await update.message.reply_text("⛔ Unauthorized.")
@@ -589,12 +666,7 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"❌ Failed: {fail_count} (blocked/deactivated accounts)"
     )
 
-
 async def admin_setpremium(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /setpremium <user_id> — Manually grant VIP to a user (admin only)
-    Example: /setpremium 987654321
-    """
     uid = update.effective_user.id
     if not is_admin(uid):
         await update.message.reply_text("⛔ Unauthorized.")
@@ -619,14 +691,11 @@ async def admin_setpremium(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"💎 User `{target_id}` has been granted VIP status!", parse_mode="Markdown")
     try:
         await context.bot.send_message(target_id, "💎 You have been granted VIP status by the admin!")
+        await ask_preference(context.bot, target_id)
     except Exception:
         pass
 
-
 async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /adminhelp — Show all admin commands
-    """
     uid = update.effective_user.id
     if not is_admin(uid):
         await update.message.reply_text("⛔ Unauthorized.")
@@ -648,6 +717,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     text = update.message.text
 
+    # Check if we are awaiting profile input
     if user_states.get(uid) == "awaiting_age":
         try:
             age = int(text)
@@ -720,11 +790,14 @@ app.add_handler(CallbackQueryHandler(btn_profile, pattern="^profile$"))
 app.add_handler(CallbackQueryHandler(btn_set_gender, pattern="^set_gender$"))
 app.add_handler(CallbackQueryHandler(btn_gender_select, pattern="^gender_(M|F)$"))
 app.add_handler(CallbackQueryHandler(btn_set_age, pattern="^set_age$"))
+app.add_handler(CallbackQueryHandler(btn_set_preference, pattern="^set_pref$"))
+app.add_handler(CallbackQueryHandler(btn_preference_select, pattern="^setpref_(M|F|Any)$"))
 app.add_handler(CallbackQueryHandler(btn_back_to_menu, pattern="^back_to_menu$"))
 
-# Message Handler
+# Message Handlers
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 if __name__ == "__main__":
     print("Bot running...")
     app.run_polling()
+```
