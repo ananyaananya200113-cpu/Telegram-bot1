@@ -12,6 +12,12 @@ from telegram.ext import (
     filters,
 )
 
+# ---------------- CONFIGURATION ---------------- #
+# CHANNEL CONFIG
+CHANNEL_USERNAME = "@YourChannel"  # 📢 Replace with your official channel username (must start with @)
+# SUPPORT CONFIG
+SUPPORT_CONTACT = "@YourSupportUsername"  # 💳 Replace with your support telegram username (must start with @)
+
 # ---------------- TOKEN (SAFE) ---------------- #
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 if not TOKEN:
@@ -33,7 +39,17 @@ cur.execute("""
 CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
     referral_count INTEGER DEFAULT 0,
-    premium INTEGER DEFAULT 0
+    premium INTEGER DEFAULT 0,
+    gender TEXT DEFAULT 'Not set',
+    age INTEGER DEFAULT 0,
+    total_dialogs INTEGER DEFAULT 0,
+    today_dialogs INTEGER DEFAULT 0,
+    last_dialog_date TEXT DEFAULT '',
+    sent_messages INTEGER DEFAULT 0,
+    received_messages INTEGER DEFAULT 0,
+    premium_preference TEXT DEFAULT 'Any',
+    premium_expiry INTEGER DEFAULT 0,
+    free_chats_used INTEGER DEFAULT 0
 )
 """)
 cur.execute("""
@@ -58,7 +74,7 @@ def add_column_if_not_exists(table, column, definition):
     except sqlite3.OperationalError:
         pass
 
-# Setup database columns for profile and preference fields
+# Setup database columns for profile, preference, and subscription fields
 add_column_if_not_exists("users", "gender", "TEXT DEFAULT 'Not set'")
 add_column_if_not_exists("users", "age", "INTEGER DEFAULT 0")
 add_column_if_not_exists("users", "total_dialogs", "INTEGER DEFAULT 0")
@@ -67,6 +83,8 @@ add_column_if_not_exists("users", "last_dialog_date", "TEXT DEFAULT ''")
 add_column_if_not_exists("users", "sent_messages", "INTEGER DEFAULT 0")
 add_column_if_not_exists("users", "received_messages", "INTEGER DEFAULT 0")
 add_column_if_not_exists("users", "premium_preference", "TEXT DEFAULT 'Any'")
+add_column_if_not_exists("users", "premium_expiry", "INTEGER DEFAULT 0")
+add_column_if_not_exists("users", "free_chats_used", "INTEGER DEFAULT 0")
 
 # Clear stale queue on startup
 cur.execute("DELETE FROM queue")
@@ -81,9 +99,16 @@ def create_user(uid):
     conn.commit()
 
 def is_premium(uid):
-    cur.execute("SELECT premium FROM users WHERE user_id=?", (uid,))
+    cur.execute("SELECT premium, premium_expiry FROM users WHERE user_id=?", (uid,))
     r = cur.fetchone()
-    return r and r[0] == 1
+    if not r:
+        return False
+    prem, expiry = r
+    if prem == 1:
+        # If premium_expiry is 0, it means unlimited/permanent premium
+        if expiry == 0 or expiry > int(time.time()):
+            return True
+    return False
 
 def get_ref(uid):
     cur.execute("SELECT referral_count FROM users WHERE user_id=?", (uid,))
@@ -98,6 +123,23 @@ def add_ref(uid):
 
 def set_premium(uid):
     cur.execute("UPDATE users SET premium=1 WHERE user_id=?", (uid,))
+    conn.commit()
+
+def add_premium_hours(uid, hours):
+    now = int(time.time())
+    cur.execute("SELECT premium, premium_expiry FROM users WHERE user_id=?", (uid,))
+    row = cur.fetchone()
+    if not row:
+        create_user(uid)
+        row = (0, 0)
+    
+    prem, expiry = row
+    if prem == 1 and expiry > now:
+        new_expiry = expiry + (hours * 3600)
+    else:
+        new_expiry = now + (hours * 3600)
+        
+    cur.execute("UPDATE users SET premium=1, premium_expiry=? WHERE user_id=?", (new_expiry, uid))
     conn.commit()
 
 def in_chat(uid):
@@ -121,7 +163,7 @@ def end_chat(uid):
 
 def get_user_profile(uid):
     cur.execute("""
-        SELECT user_id, gender, age, total_dialogs, today_dialogs, last_dialog_date, sent_messages, received_messages, premium_preference
+        SELECT user_id, gender, age, total_dialogs, today_dialogs, last_dialog_date, sent_messages, received_messages, premium_preference, premium_expiry
         FROM users WHERE user_id=?
     """, (uid,))
     return cur.fetchone()
@@ -153,6 +195,16 @@ def increment_dialogs(uid):
         WHERE user_id=?
     """, (total, today, today_str, uid))
     conn.commit()
+
+# Check if user is in channel
+async def is_channel_member(bot, uid):
+    try:
+        member = await bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=uid)
+        return member.status in ('creator', 'administrator', 'member')
+    except Exception as e:
+        print(f"ERROR: failed to verify channel membership for {uid}: {e}")
+        # Fail-safe: if bot is not in channel yet, allow chat to prevent blocking everyone
+        return True
 
 # ---------------- ADMIN HELPERS ---------------- #
 def is_admin(uid):
@@ -200,7 +252,8 @@ def menu():
         [InlineKeyboardButton("🔎 Next", callback_data="next"),
          InlineKeyboardButton("❌ End", callback_data="end")],
         [InlineKeyboardButton("👤 Profile", callback_data="profile"),
-         InlineKeyboardButton("💰 Referral", callback_data="ref")]
+         InlineKeyboardButton("💰 Referral", callback_data="ref")],
+        [InlineKeyboardButton("💎 Premium", callback_data="premium")]
     ])
 
 def profile_menu(is_vip=False):
@@ -233,12 +286,22 @@ def back_only_menu():
         [InlineKeyboardButton("🔙 Back to Profile", callback_data="profile")]
     ])
 
+def joined_channel_menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ I've Joined", callback_data="check_joined")],
+        [InlineKeyboardButton("🔙 Back to Main Menu", callback_data="back_to_menu")]
+    ])
+
 # ---------------- VIP CHECK ---------------- #
 async def check_vip(bot, uid):
+    # Grant 6 hours of premium for successful referral
     if get_ref(uid) >= 10 and not is_premium(uid):
-        set_premium(uid)
+        # Notify once when they reach the 10 refs milestone
         await bot.send_message(uid, "💎 VIP UNLOCKED! You reached 10 referrals!")
-        await ask_preference(bot, uid)
+    
+    add_premium_hours(uid, 6)
+    await bot.send_message(uid, "🎁 Referral successful! 6 Hours Premium VIP has been added to your account!")
+    await ask_preference(bot, uid)
 
 async def ask_preference(bot, uid):
     text = (
@@ -260,8 +323,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if ref_id != uid:
                 add_ref(ref_id)
                 await check_vip(context.bot, ref_id)
-        except:
-            pass
+        except Exception as e:
+            print(f"ERROR processing referral start: {e}")
     await update.message.reply_text("Welcome 👋", reply_markup=menu())
 
 # ---------------- MATCHING ---------------- #
@@ -276,6 +339,19 @@ async def next_user(uid, context, send):
         except Exception as e:
             print(f"ERROR: failed to notify partner on skip: {e}")
         await send("🤚 You left the chat")
+
+    # Check join channel restrictions for free users
+    is_vip = is_premium(uid)
+    if not is_vip:
+        joined = await is_channel_member(context.bot, uid)
+        if not joined:
+            cur.execute("SELECT free_chats_used FROM users WHERE user_id=?", (uid,))
+            row = cur.fetchone()
+            used = row[0] if row else 0
+            if used >= 3:
+                # Block search and show joined prompt
+                await show_join_channel_prompt(uid, context, send)
+                return
 
     # Fetch searching user details
     cur.execute("SELECT gender, premium, premium_preference FROM users WHERE user_id=?", (uid,))
@@ -327,6 +403,15 @@ async def next_user(uid, context, send):
     cur.execute("INSERT INTO active_chats VALUES (?,?)", (uid, partner))
     conn.commit()
 
+    # Track free chat limits if they are not in the channel
+    # User A
+    if not is_premium(uid) and not await is_channel_member(context.bot, uid):
+        cur.execute("UPDATE users SET free_chats_used = free_chats_used + 1 WHERE user_id=?", (uid,))
+    # User B (Partner)
+    if not is_premium(partner) and not await is_channel_member(context.bot, partner):
+        cur.execute("UPDATE users SET free_chats_used = free_chats_used + 1 WHERE user_id=?", (partner,))
+    conn.commit()
+
     increment_dialogs(uid)
     increment_dialogs(partner)
 
@@ -338,17 +423,145 @@ async def next_user(uid, context, send):
     await context.bot.send_message(uid, match_text, reply_markup=menu())
     await context.bot.send_message(partner, match_text, reply_markup=menu())
 
-# ---------------- REFERRAL ---------------- #
+# ---------------- CHANNEL JOIN PROMPT ---------------- #
+async def show_join_channel_prompt(uid, context, send):
+    text = (
+        "🔒 *Free Chat Limit Reached!*\n\n"
+        "To continue chatting, please join our official channel.\n\n"
+        f"📢 Join Channel: {CHANNEL_USERNAME}\n\n"
+        "After joining, click the button below to continue chatting.\n\n"
+        "🎁 Channel members get uninterrupted access to Ann Chat."
+    )
+    await send(text, reply_markup=joined_channel_menu(), parse_mode="Markdown")
+
+async def btn_check_joined(update, context):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    
+    joined = await is_channel_member(context.bot, uid)
+    if joined:
+        await q.message.edit_text(
+            "✅ Thank you for joining! You now have uninterrupted access to Ann Chat.",
+            reply_markup=menu()
+        )
+        await next_user(uid, context, q.message.reply_text)
+    else:
+        await q.message.reply_text(
+            f"❌ You have not joined the channel yet. Please join {CHANNEL_USERNAME} first.",
+            reply_markup=joined_channel_menu()
+        )
+
+# ---------------- REFERRAL Flow ---------------- #
 async def referral(uid, send):
     ref = get_ref(uid)
     prem = is_premium(uid)
     link = f"https://t.me/Annchattingbot?start={uid}"
+    
     await send(
-        f"💰 Referral System\n\n"
-        f"👥 Referrals: {ref}/10\n"
-        f"⭐ Status: {'VIP' if prem else 'FREE'}\n\n"
-        f"Link:\n{link}"
+        f"💰 *Referral System*\n\n"
+        f"👥 Referrals: `{ref}`\n"
+        f"⭐ Status: `{'VIP' if prem else 'FREE'}`\n\n"
+        f"Invite your friends and earn:\n"
+        f"🎁 *6 Hours Premium* for every successful referral!\n\n"
+        f"🔗 *Your Referral Link:*\n"
+        f"{link}",
+        parse_mode="Markdown"
     )
+
+# ---------------- PREMIUM PLANS Flow ---------------- #
+async def show_premium_plans(uid, send_or_edit):
+    profile = get_user_profile(uid)
+    expiry = profile[9] if (profile and len(profile) > 9) else 0
+    now = int(time.time())
+    
+    if is_premium(uid):
+        if expiry == 0:
+            status_text = "⭐ Status: *Premium (Lifetime)*\n\n"
+        else:
+            time_left = expiry - now
+            if time_left > 0:
+                hours = time_left // 3600
+                minutes = (time_left % 3600) // 60
+                status_text = f"⭐ Status: *Premium ({hours}h {minutes}m remaining)*\n\n"
+            else:
+                status_text = "⭐ Status: *Free*\n\n"
+    else:
+        status_text = "⭐ Status: *Free*\n\n"
+
+    plans_text = (
+        f"⭐️ *ANN PREMIUM PLANS*\n\n"
+        f"{status_text}"
+        f"🎁 *Referral Premium*\n"
+        f"• 6 Hours Premium per successful referral\n"
+        f"• Gender Preference Matching\n"
+        f"• Unlimited Skips\n"
+        f"• Priority Matching\n\n"
+        f"────────────────────\n\n"
+        f"💎 *Premium Lite*\n"
+        f"₹15\n"
+        f"⏳ Duration: 1 Day\n\n"
+        f"Benefits:\n"
+        f"• Gender Preference Matching\n"
+        f"• Unlimited Skips\n"
+        f"• Priority Matching\n\n"
+        f"────────────────────\n\n"
+        f"💎 *Premium Weekly*\n"
+        f"₹59\n"
+        f"⏳ Duration: 7 Days\n\n"
+        f"Benefits:\n"
+        f"• Gender Preference Matching\n"
+        f"• Unlimited Skips\n"
+        f"• Priority Matching\n"
+        f"• Premium Badge\n\n"
+        f"────────────────────\n\n"
+        f"💎 *Premium Plus*\n"
+        f"₹99\n"
+        f"⏳ Duration: 15 Days\n\n"
+        f"Benefits:\n"
+        f"• Gender Preference Matching\n"
+        f"• Unlimited Skips\n"
+        f"• Priority Matching\n"
+        f"• Premium Badge\n"
+        f"• Faster Match Priority\n\n"
+        f"────────────────────\n\n"
+        f"💎 *Premium Monthly*\n"
+        f"₹179\n"
+        f"⏳ Duration: 30 Days\n\n"
+        f"Benefits:\n"
+        f"• Gender Preference Matching\n"
+        f"• Unlimited Skips\n"
+        f"• Priority Matching\n"
+        f"• Premium Badge\n"
+        f"• Faster Match Priority\n"
+        f"• Highest Queue Priority\n\n"
+        f"────────────────────\n\n"
+        f"🎯 *Premium Features*\n\n"
+        f"✅ Gender Preference Matching\n"
+        f"✅ Unlimited Partner Skips\n"
+        f"✅ Faster Matchmaking\n"
+        f"✅ Priority Queue Access\n"
+        f"✅ Premium Badge\n"
+        f"✅ Exclusive Premium Features"
+    )
+
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💳 Buy Premium", callback_data="buy_premium")],
+        [InlineKeyboardButton("🔙 Back to Main Menu", callback_data="back_to_menu")]
+    ])
+    await send_or_edit(plans_text, reply_markup=markup)
+
+async def btn_buy_premium(update, context):
+    q = update.callback_query
+    await q.answer()
+    text = (
+        "💳 *How to Buy Premium*\n\n"
+        "To purchase any premium plan, please contact our support team. "
+        "Send a message specifying the plan you want, and they will provide payment details:\n\n"
+        f"📥 Contact Admin: {SUPPORT_CONTACT}\n\n"
+        "After payment is confirmed, the admin will activate your premium plan instantly."
+    )
+    await q.message.edit_text(text, reply_markup=back_only_menu(), parse_mode="Markdown")
 
 # ---------------- BUTTONS ---------------- #
 async def btn_next(update, context):
@@ -370,7 +583,22 @@ async def btn_ref(update, context):
     await q.answer()
     uid = q.from_user.id
     user_states.pop(uid, None)
-    await referral(uid, q.message.reply_text)
+    
+    async def edit_msg(text, reply_markup):
+        await q.message.edit_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+        
+    await referral(uid, edit_msg)
+
+async def btn_premium(update, context):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    user_states.pop(uid, None)
+    
+    async def edit_msg(text, reply_markup):
+        await q.message.edit_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+        
+    await show_premium_plans(uid, edit_msg)
 
 # ---------------- PROFILE SYSTEM & BUTTONS ---------------- #
 async def show_profile(uid, send_or_edit, reply_markup=None):
@@ -378,7 +606,7 @@ async def show_profile(uid, send_or_edit, reply_markup=None):
     if not profile:
         create_user(uid)
         profile = get_user_profile(uid)
-    _, gender, age, total_dialogs, today_dialogs, last_dialog_date, sent_messages, received_messages, pref = profile
+    _, gender, age, total_dialogs, today_dialogs, last_dialog_date, sent_messages, received_messages, pref, expiry = profile
     today_str = datetime.date.today().isoformat()
     if last_dialog_date != today_str:
         today_dialogs = 0
@@ -495,6 +723,15 @@ async def referral_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_states.pop(uid, None)
     await referral(uid, update.message.reply_text)
 
+async def premium_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    user_states.pop(uid, None)
+    
+    async def reply_msg(text, reply_markup):
+        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+        
+    await show_premium_plans(uid, reply_msg)
+
 async def profile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     user_states.pop(uid, None)
@@ -602,7 +839,7 @@ async def admin_find_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ User not found in database.")
         return
 
-    user_id, gender, age, total_d, today_d, last_date, sent, received, pref = profile
+    user_id, gender, age, total_d, today_d, last_date, sent, received, pref, expiry = profile
     refs  = get_ref(target_id)
     prem  = is_premium(target_id)
     in_c  = bool(in_chat(target_id))
@@ -616,6 +853,8 @@ async def admin_find_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         activity = "💤 Idle"
 
+    expiry_display = "Lifetime" if expiry == 0 else datetime.datetime.fromtimestamp(expiry).strftime('%Y-%m-%d %H:%M:%S')
+
     await update.message.reply_text(
         f"🔍 *User Details*\n\n"
         f"🆔 ID: `{user_id}`\n"
@@ -623,6 +862,7 @@ async def admin_find_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔞 Age: {age if age and age > 0 else 'Not set'}\n"
         f"🎯 Preference: {pref or 'Any'}\n"
         f"⭐ Status: {status_line}\n"
+        f"⏳ Expiry: {expiry_display}\n"
         f"📡 Activity: {activity}\n\n"
         f"💬 Total Dialogs: `{total_d}`\n"
         f"📅 Today's Dialogs: `{today_d}`\n"
@@ -671,7 +911,7 @@ async def admin_setpremium(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not context.args:
-        await update.message.reply_text("Usage: `/setpremium <user_id>`", parse_mode="Markdown")
+        await update.message.reply_text("Usage: `/setpremium <user_id> [days]`", parse_mode="Markdown")
         return
 
     try:
@@ -680,15 +920,27 @@ async def admin_setpremium(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Invalid user ID.")
         return
 
+    days = 30
+    if len(context.args) > 1:
+        try:
+            days = int(context.args[1])
+        except ValueError:
+            pass
+
     profile = get_user_profile(target_id)
     if not profile:
         await update.message.reply_text("❌ User not found.")
         return
 
-    set_premium(target_id)
-    await update.message.reply_text(f"💎 User `{target_id}` has been granted VIP status!", parse_mode="Markdown")
+    now = int(time.time())
+    new_expiry = now + (days * 24 * 3600)
+
+    cur.execute("UPDATE users SET premium=1, premium_expiry=? WHERE user_id=?", (new_expiry, target_id))
+    conn.commit()
+
+    await update.message.reply_text(f"💎 User `{target_id}` has been granted VIP status for {days} days!", parse_mode="Markdown")
     try:
-        await context.bot.send_message(target_id, "💎 You have been granted VIP status by the admin!")
+        await context.bot.send_message(target_id, f"💎 You have been granted VIP status for {days} days by the admin!")
         await ask_preference(context.bot, target_id)
     except Exception:
         pass
@@ -704,7 +956,7 @@ async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`/stats` — Bot statistics overview\n"
         "`/users [page]` — List all users (10 per page)\n"
         "`/finduser <id>` — Look up a specific user\n"
-        "`/setpremium <id>` — Grant VIP to a user\n"
+        "`/setpremium <id> [days]` — Grant VIP to a user for custom days\n"
         "`/broadcast <msg>` — Send message to all users\n"
         "`/adminhelp` — Show this help message",
         parse_mode="Markdown"
@@ -770,6 +1022,7 @@ app.add_handler(CommandHandler("next", next_cmd))
 app.add_handler(CommandHandler("end", end_cmd))
 app.add_handler(CommandHandler("stop", end_cmd))
 app.add_handler(CommandHandler("referral", referral_cmd))
+app.add_handler(CommandHandler("premium", premium_cmd))
 app.add_handler(CommandHandler("profile", profile_cmd))
 
 # Admin commands
@@ -784,6 +1037,9 @@ app.add_handler(CommandHandler("adminhelp", admin_help))
 app.add_handler(CallbackQueryHandler(btn_next, pattern="^next$"))
 app.add_handler(CallbackQueryHandler(btn_end, pattern="^end$"))
 app.add_handler(CallbackQueryHandler(btn_ref, pattern="^ref$"))
+app.add_handler(CallbackQueryHandler(btn_premium, pattern="^premium$"))
+app.add_handler(CallbackQueryHandler(btn_buy_premium, pattern="^buy_premium$"))
+app.add_handler(CallbackQueryHandler(btn_check_joined, pattern="^check_joined$"))
 app.add_handler(CallbackQueryHandler(btn_profile, pattern="^profile$"))
 app.add_handler(CallbackQueryHandler(btn_set_gender, pattern="^set_gender$"))
 app.add_handler(CallbackQueryHandler(btn_gender_select, pattern="^gender_(M|F)$"))
