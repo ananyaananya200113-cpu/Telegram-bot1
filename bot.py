@@ -18,10 +18,10 @@ if not TOKEN:
 # ---------------- ADMIN CONFIG ---------------- #
 # To get your ID: open Telegram → search @userinfobot → send /start
 ADMIN_IDS = {
-    8550879731,  # Your ID
-    8637459083,
-    8946438351 # Second admin's ID
-} # ⚠️ Replace this with your real Telegram numeric ID
+    8550879731,  # Admin 1
+    8637459083,  # Admin 2
+    8946438351   # Admin 3
+}# ⚠️ Replace this with your real Telegram numeric ID
 # ---------------- DATABASE ---------------- #
 conn = sqlite3.connect("anon_chat.db", check_same_thread=False)
 cur = conn.cursor()
