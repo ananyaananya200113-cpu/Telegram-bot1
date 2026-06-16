@@ -17,7 +17,11 @@ if not TOKEN:
     raise Exception("TELEGRAM_TOKEN is not set in environment variables!")
 # ---------------- ADMIN CONFIG ---------------- #
 # To get your ID: open Telegram → search @userinfobot → send /start
-ADMIN_ID = 8550879731  # ⚠️ Replace this with your real Telegram numeric ID
+ADMIN_IDS = {
+    8550879731,  # Your ID
+    8637459083,
+    8946438351 # Second admin's ID
+} # ⚠️ Replace this with your real Telegram numeric ID
 # ---------------- DATABASE ---------------- #
 conn = sqlite3.connect("anon_chat.db", check_same_thread=False)
 cur = conn.cursor()
